@@ -62,9 +62,7 @@ export default function Hero() {
           insights, forecast digital assets and earn rewards.
         </p>
 
-        {/* CTA Buttons */}
         <div className="flex flex-col sm:flex-row items-center justify-center gap-6">
-          {/* PERBAIKAN: Menggunakan Link, bukan a */}
           <Link
             href="/markets"
             className="group relative px-10 py-5 gradient-accent rounded-full font-bold text-white text-lg shadow-lg shadow-accent/30 hover:shadow-xl hover:shadow-accent/50 transition-all duration-300 hover:scale-105 overflow-hidden"
@@ -72,8 +70,6 @@ export default function Hero() {
             <span className="relative z-10">Explore Markets</span>
             <div className="absolute inset-0 bg-gradient-to-r from-accent-bright to-accent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
           </Link>
-          
-          {/* PERBAIKAN: Menggunakan Link, bukan a */}
           <Link
             href="/create"
             className="group px-10 py-5 glass-strong rounded-full font-bold text-white text-lg border-2 border-white/20 hover:border-accent-bright/50 hover:bg-white/10 transition-all duration-300 hover:scale-105"
@@ -82,8 +78,6 @@ export default function Hero() {
           </Link>
         </div>
       </div>
-
-      {/* Bottom gradient fade */}
       <div className="absolute bottom-0 left-0 right-0 h-40 bg-gradient-to-t from-background to-transparent" />
     </section>
   );
