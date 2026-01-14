@@ -1,5 +1,5 @@
 "use client";
-
+export const runtime = 'edge';
 import Header from "@/components/Header";
 import LeaderboardTable from "@/components/leaderboard/LeaderboardTable";
 
