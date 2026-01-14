@@ -17,6 +17,9 @@ dependencies:
   '@tanstack/react-query':
     specifier: ^5.90.5
     version: 5.90.17(react@19.2.0)
+  '@wagmi/core':
+    specifier: ^3.2.2
+    version: 3.2.2(@types/react@19.2.8)(react@19.2.0)(typescript@5.9.3)(viem@2.44.2)
   ethers:
     specifier: ^6.15.0
     version: 6.16.0
@@ -36,10 +39,10 @@ dependencies:
     specifier: 19.2.0
     version: 19.2.0(react@19.2.0)
   viem:
-    specifier: ^2.38.4
+    specifier: ^2.44.2
     version: 2.44.2(typescript@5.9.3)(zod@4.3.5)
   wagmi:
-    specifier: ^2.18.2
+    specifier: ^2.19.5
     version: 2.19.5(@tanstack/react-query@5.90.17)(@types/react@19.2.8)(react@19.2.0)(typescript@5.9.3)(viem@2.44.2)(zod@4.3.5)
 
 devDependencies:
