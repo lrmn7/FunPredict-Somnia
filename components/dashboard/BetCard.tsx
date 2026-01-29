@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock, Users, TrendingUp, Trophy } from "lucide-react";
+import { Clock, Users, TrendingUp, Trophy, RefreshCw } from "lucide-react"; // Tambahkan RefreshCw
 import Link from "next/link";
 
 interface BetCardProps {
@@ -9,7 +9,8 @@ interface BetCardProps {
   selectedOption: string;
   entryFee: string;
   endTime: Date;
-  status: "active" | "closed" | "won" | "lost";
+  // UPDATE: Tambahkan "pending_resolution" di sini
+  status: "active" | "closed" | "won" | "lost" | "pending_resolution"; 
   prizeAmount?: string;
   claimed?: boolean;
   totalParticipants: number;
@@ -43,10 +44,19 @@ export default function BetCard({
       case "closed":
         return {
           label: "Closed",
-          bgColor: "bg-yellow-500/20",
-          textColor: "text-yellow-400",
-          borderColor: "border-yellow-500/30",
+          bgColor: "bg-gray-500/20",
+          textColor: "text-gray-400",
+          borderColor: "border-gray-500/30",
           icon: Clock,
+        };
+      // LOGIKA BARU: Status Pending Resolution
+      case "pending_resolution":
+        return {
+          label: "Pending Resolution",
+          bgColor: "bg-orange-500/20",
+          textColor: "text-orange-400",
+          borderColor: "border-orange-500/30",
+          icon: RefreshCw,
         };
       case "won":
         return {
@@ -62,6 +72,14 @@ export default function BetCard({
           bgColor: "bg-red-500/20",
           textColor: "text-red-400",
           borderColor: "border-red-500/30",
+          icon: Clock,
+        };
+      default:
+        return {
+          label: "Unknown",
+          bgColor: "bg-gray-500/20",
+          textColor: "text-gray-400",
+          borderColor: "border-gray-500/30",
           icon: Clock,
         };
     }
@@ -93,7 +111,7 @@ export default function BetCard({
             
             {/* Status badge */}
             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${statusConfig.bgColor} ${statusConfig.textColor} border ${statusConfig.borderColor} text-sm font-semibold whitespace-nowrap`}>
-              <StatusIcon className="w-4 h-4" />
+              <StatusIcon className={`w-4 h-4 ${status === 'pending_resolution' ? 'animate-spin-slow' : ''}`} />
               <span>{statusConfig.label}</span>
             </div>
           </div>
@@ -119,8 +137,8 @@ export default function BetCard({
             </div>
           </div>
 
-          {/* Live Odds & Potential Payout (for active bets) */}
-          {status === "active" && currentOdds !== undefined && potentialPayout && (
+          {/* Potential Payout (jika active atau pending) */}
+          {(status === "active" || status === "pending_resolution") && currentOdds !== undefined && potentialPayout && (
             <div className="mb-4 p-3 bg-cosmic-blue/10 border border-cosmic-blue/30 rounded-lg">
               <div className="grid grid-cols-2 gap-4">
                 <div>

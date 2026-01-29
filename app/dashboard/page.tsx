@@ -12,12 +12,11 @@ import ProgressRing from "@/components/dashboard/ProgressRing";
 import QuickActions from "@/components/dashboard/QuickActions";
 import NotificationAlert from "@/components/dashboard/NotificationAlert";
 import BetHistoryFilters, { type BetStatusFilter, type BetSortOption } from "@/components/dashboard/BetHistoryFilters";
-import { Target, Trophy, DollarSign, Wallet, TrendingUp, Award, Sparkles, Activity } from "lucide-react";
+import { Target, Trophy, DollarSign, Wallet, TrendingUp, Award, Sparkles, Activity, AlertTriangle, RefreshCw, Zap, Clock } from "lucide-react";
 import type { DashboardTab, RecentActivity } from "./types";
 import { PrizePredictionContract } from "../../app/ABIs/index";
 import PrizePoolPredictionABI from "../../app/ABIs/Prediction.json";
 import { exportBetsToCSV } from "./exportUtils";
-import Link from "next/link";
 
 interface UserStats {
   totalPredictions: number;
@@ -39,10 +38,23 @@ interface ActiveBet {
   entryFee: string;
   timestamp: Date;
   endTime: Date;
-  status: "active" | "closed" | "won" | "lost";
+  status: "active" | "closed" | "won" | "lost" | "pending_resolution"; // Update status type
   prizeAmount?: string;
   claimed?: boolean;
   totalParticipants: number;
+}
+
+// Interface baru untuk market yang perlu di-resolve/claim
+interface MarketToResolve {
+  id: string;
+  question: string;
+  options: string[];
+  totalParticipants: number;
+  prizePool: string;
+  endTime: Date;
+  resolutionTime: Date; 
+  isEmergency: boolean; 
+  userRole: "creator" | "participant"; 
 }
 
 export default function DashboardPage() {
@@ -54,7 +66,11 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [userAddress, setUserAddress] = useState("");
   
-  // Filter and search states
+  // State baru untuk Market Action
+  const [marketsToResolve, setMarketsToResolve] = useState<MarketToResolve[]>([]);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
+  
+  // Filter States
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<BetStatusFilter>("all");
   const [sortOption, setSortOption] = useState<BetSortOption>("newest");
@@ -75,12 +91,9 @@ export default function DashboardPage() {
       }
 
       const provider = new ethers.BrowserProvider(window.ethereum as any);
-      await provider.send("eth_requestAccounts", []);
-      const signer = await provider.getSigner();
-      const address = await signer.getAddress();
+      const accounts = await provider.send("eth_requestAccounts", []);
+      const address = accounts[0];
       setUserAddress(address);
-
-      console.log("Connected wallet:", address);
 
       const contract = new ethers.Contract(
         PrizePredictionContract.address,
@@ -88,46 +101,101 @@ export default function DashboardPage() {
         provider
       );
 
-      // Fetch user stats from contract
+      // 1. Fetch User Stats
       const stats = await contract.getUserStats(address);
-      
-      // Fetch wallet balance
       const balance = await provider.getBalance(address);
 
-      const userStatsData: UserStats = {
+      setUserStats({
         totalPredictions: Number(stats.totalPredictions),
         correctPredictions: Number(stats.correctPredictions),
         currentStreak: Number(stats.currentStreak),
         longestStreak: Number(stats.longestStreak),
         totalWinnings: ethers.formatEther(stats.totalWinnings),
-        accuracyPercentage: Number(stats.accuracyPercentage) / 100, // Convert from basis points
+        accuracyPercentage: Number(stats.accuracyPercentage) / 100,
         hasStreakSaver: stats.hasStreakSaver,
         totalPoints: Number(stats.totalPoints),
         walletBalance: ethers.formatEther(balance),
-      };
+      });
 
-      console.log("User stats:", userStatsData);
-      setUserStats(userStatsData);
+      // 2. LOGIKA PENTING: Cari Market Macet / Butuh Resolve
+      const predictionCounter = await contract.predictionCounter();
+      const totalPredictions = Number(predictionCounter);
+      const marketsNeedResolution: MarketToResolve[] = [];
+      const now = new Date();
 
-      // Fetch user's participated predictions
-      const participatedPredictionIds = await contract.getUserParticipatedPredictions(address);
-      console.log("Participated predictions:", participatedPredictionIds);
+      // Ambil daftar prediksi yang diikuti user
+      const userParticipatedIds = await contract.getUserParticipatedPredictions(address);
+      const participatedSet = new Set(userParticipatedIds.map((id: bigint) => Number(id)));
 
-      // Fetch details for each participated prediction
-      const betsPromises = participatedPredictionIds.map((id: bigint) =>
+      // Loop 50 market terakhir untuk efisiensi
+      const startLoop = totalPredictions; 
+      const endLoop = Math.max(1, totalPredictions - 50); 
+
+      for (let i = startLoop; i >= endLoop; i--) {
+        try {
+          const pred = await contract.getPrediction(i);
+          
+          const isCreator = pred.creator.toLowerCase() === address.toLowerCase();
+          const isParticipant = participatedSet.has(i);
+          
+          const endTime = new Date(Number(pred.endTime) * 1000);
+          const resolutionTime = new Date(Number(pred.resolutionTime) * 1000);
+          
+          const isEnded = now > endTime;
+          const isResolved = pred.resolved;
+          
+          // Emergency Time = ResolutionTime + 7 Hari (Sesuai Smart Contract)
+          const emergencyThreshold = new Date(resolutionTime.getTime() + (7 * 24 * 60 * 60 * 1000));
+          const isEmergencyTime = now > emergencyThreshold;
+
+          // Kondisi: Market sudah selesai waktunya, TAPI belum di-resolve (Uang tertahan)
+          if (isEnded && !isResolved && pred.active) {
+             
+             // KASUS A: Saya Creator -> Wajib resolve normal
+             if (isCreator) {
+                marketsNeedResolution.push({
+                  id: pred.id.toString(),
+                  question: pred.question,
+                  options: [...pred.options],
+                  totalParticipants: Number(pred.totalParticipants),
+                  prizePool: ethers.formatEther(pred.prizePool),
+                  endTime: endTime,
+                  resolutionTime: resolutionTime,
+                  isEmergency: isEmergencyTime, 
+                  userRole: "creator"
+                });
+             } 
+             // KASUS B: Saya Peserta -> Cek apakah Creator kabur (Emergency Mode)
+             else if (isParticipant) {
+                marketsNeedResolution.push({
+                  id: pred.id.toString(),
+                  question: pred.question,
+                  options: [...pred.options],
+                  totalParticipants: Number(pred.totalParticipants),
+                  prizePool: ethers.formatEther(pred.prizePool),
+                  endTime: endTime,
+                  resolutionTime: resolutionTime,
+                  isEmergency: isEmergencyTime,
+                  userRole: "participant"
+                });
+             }
+          }
+        } catch (err) {
+          console.error(`Failed to fetch prediction ${i}`, err);
+        }
+      }
+      setMarketsToResolve(marketsNeedResolution);
+
+      // 3. Fetch Active Bets History
+      const betsPromises = userParticipatedIds.map((id: bigint) =>
         fetchBetDetails(contract, Number(id), address)
       );
       const bets = await Promise.all(betsPromises);
       const validBets = bets.filter((bet): bet is ActiveBet => bet !== null);
 
-      // Sort by timestamp (newest first)
       validBets.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-
       setActiveBets(validBets);
-
-      // Generate activities from bets
-      const generatedActivities = generateActivities(validBets);
-      setActivities(generatedActivities);
+      setActivities(generateActivities(validBets));
 
     } catch (err) {
       console.error("Error fetching dashboard data:", err);
@@ -143,27 +211,22 @@ export default function DashboardPage() {
     userAddress: string
   ): Promise<ActiveBet | null> => {
     try {
-      // Fetch prediction details
       const prediction = await contract.getPrediction(predictionId);
-      
-      // Fetch user's prediction
       const userPrediction = await contract.getUserPrediction(predictionId, userAddress);
       
-      if (userPrediction.timestamp === BigInt(0)) {
-        return null; // User hasn't predicted on this market
-      }
+      if (userPrediction.timestamp === BigInt(0)) return null;
 
-      // Fetch user's prize status
       const prizeStatus = await contract.getUserPrizeStatus(predictionId, userAddress);
-
       const endTime = new Date(Number(prediction.endTime) * 1000);
       const now = new Date();
       
-      let status: "active" | "closed" | "won" | "lost";
+      let status: "active" | "closed" | "won" | "lost" | "pending_resolution";
+      
       if (prediction.resolved) {
         status = prizeStatus.hasWon ? "won" : "lost";
       } else if (now > endTime) {
-        status = "closed";
+        // Jika waktu habis tapi belum resolve, statusnya pending
+        status = "pending_resolution";
       } else {
         status = "active";
       }
@@ -187,26 +250,77 @@ export default function DashboardPage() {
     }
   };
 
+  // --- LOGIKA TOMBOL RESOLVE / FORCE CLAIM ---
+  const handleResolveMarket = async (market: MarketToResolve, optionIndex: number) => {
+    try {
+      if (!window.ethereum) return;
+      
+      const provider = new ethers.BrowserProvider(window.ethereum as any);
+      const signer = await provider.getSigner();
+      const contract = new ethers.Contract(
+        PrizePredictionContract.address,
+        PrizePoolPredictionABI.abi,
+        signer
+      );
+
+      setResolvingId(market.id);
+      let tx;
+
+      // Smart Logic: Otomatis pilih metode
+      if (market.isEmergency) {
+        // Jika sudah masuk waktu emergency (Creator telat > 7 hari) -> Siapapun bisa claim
+        console.log("Executing Emergency Resolve...");
+        tx = await contract.emergencyResolve(market.id, optionIndex);
+      } else {
+        // Jika masih waktu normal -> Hanya Creator
+        console.log("Executing Standard Resolve...");
+        tx = await contract.resolvePrediction(market.id, optionIndex);
+      }
+      
+      await tx.wait();
+      alert("Success! Market resolved and prizes automatically transferred to wallet.");
+      
+      connectAndFetchData(); // Refresh UI
+
+    } catch (err: any) {
+      console.error("Error resolving market:", err);
+      let msg = err.reason || err.message || "Unknown error";
+      if (msg.includes("Only creator")) msg = "Only the creator can resolve right now. Please wait for the Emergency Period.";
+      if (msg.includes("Resolution period expired")) msg = "Normal resolution expired. Please use the Force Claim button.";
+      
+      alert(`Transaction Failed: ${msg}`);
+    } finally {
+      setResolvingId(null);
+    }
+  };
+
+  // --- CLAIM ALL INTEGRATION ---
+  const handleClaimAll = () => {
+    const stuckMarkets = marketsToResolve.filter(m => m.isEmergency);
+    if (stuckMarkets.length > 0) {
+      const confirm = window.confirm(`Found ${stuckMarkets.length} markets eligible for Force Claim. Proceed to claim section?`);
+      if (confirm) {
+         const element = document.getElementById('action-required-section');
+         if (element) element.scrollIntoView({ behavior: 'smooth' });
+      }
+    } else {
+      alert("No pending claims found. Prizes are distributed automatically upon resolution. If a market just ended, please wait for the creator.");
+    }
+  };
+
+  // Helpers
   const generateActivities = (bets: ActiveBet[]): RecentActivity[] => {
-  return bets.slice(0, 10).map((bet) => {
-    const position = bet.selectedOption as "Yes" | "No";
-    return {
+    return bets.slice(0, 10).map((bet) => ({
       id: bet.id,
       type: bet.status === "won" ? "bet_won" : bet.status === "lost" ? "bet_lost" : "bet_placed",
       marketQuestion: bet.question,
-      amount: parseFloat(
-        bet.status === "won" && bet.prizeAmount 
-          ? bet.prizeAmount 
-          : bet.entryFee
-      ),
+      amount: parseFloat((bet.status === "won" && bet.prizeAmount) ? bet.prizeAmount : bet.entryFee),
       timestamp: bet.timestamp,
-      position,
+      position: bet.selectedOption as "Yes" | "No",
       currency: "STT",
-    };
-  });
-};
+    }));
+  };
 
-  // Calculate unclaimed prizes and closing soon bets
   const unclaimedPrizes = activeBets.filter(bet => bet.status === "won" && !bet.claimed).length;
   const closingSoonBets = activeBets.filter(bet => {
     if (bet.status !== "active") return false;
@@ -214,53 +328,43 @@ export default function DashboardPage() {
     return hoursUntilClose <= 24 && hoursUntilClose > 0;
   }).length;
 
-  // Filter and sort bets
   const getFilteredAndSortedBets = () => {
     let filtered = [...activeBets];
-
-    // Apply status filter
     if (statusFilter !== "all") {
-      filtered = filtered.filter(bet => bet.status === statusFilter);
+        // Simple mapping for demo filters
+        if (statusFilter === 'active') filtered = filtered.filter(b => b.status === 'active');
+        else if (statusFilter === 'won') filtered = filtered.filter(b => b.status === 'won');
+        else if (statusFilter === 'lost') filtered = filtered.filter(b => b.status === 'lost');
     }
-
-    // Apply search filter
+    
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
       filtered = filtered.filter(bet => 
-        bet.question.toLowerCase().includes(query) ||
-        bet.selectedOption.toLowerCase().includes(query)
+        bet.question.toLowerCase().includes(query) || bet.selectedOption.toLowerCase().includes(query)
       );
     }
-
-    // Apply sorting
+    
     filtered.sort((a, b) => {
       switch (sortOption) {
-        case "newest":
-          return b.timestamp.getTime() - a.timestamp.getTime();
-        case "oldest":
-          return a.timestamp.getTime() - b.timestamp.getTime();
-        case "highest":
-          return parseFloat(b.entryFee) - parseFloat(a.entryFee);
-        case "lowest":
-          return parseFloat(a.entryFee) - parseFloat(b.entryFee);
-        default:
-          return 0;
+        case "newest": return b.timestamp.getTime() - a.timestamp.getTime();
+        case "oldest": return a.timestamp.getTime() - b.timestamp.getTime();
+        case "highest": return parseFloat(b.entryFee) - parseFloat(a.entryFee);
+        case "lowest": return parseFloat(a.entryFee) - parseFloat(b.entryFee);
+        default: return 0;
       }
     });
-
     return filtered;
   };
 
   const filteredBets = getFilteredAndSortedBets();
-  const activeBetsOnly = activeBets.filter(bet => bet.status === "active" || bet.status === "closed");
+  // Filter active bets tab to show Active + Pending Resolution
+  const activeBetsOnly = activeBets.filter(bet => bet.status === "active" || bet.status === "pending_resolution");
   const winRate = userStats && userStats.totalPredictions > 0
     ? (userStats.correctPredictions / userStats.totalPredictions) * 100
     : 0;
 
-  // Export handler
   const handleExport = () => {
     if (!userStats) return;
-    
     exportBetsToCSV(
       activeBets.map(bet => ({
         id: bet.id,
@@ -279,56 +383,14 @@ export default function DashboardPage() {
     );
   };
 
-  // Claim all handler (placeholder - would need contract integration)
-  const handleClaimAll = () => {
-    alert("Claim all functionality would be integrated with smart contract here");
-  };
-
   if (loading) {
     return (
       <div className="min-h-screen bg-cosmic-dark relative overflow-hidden">
-        <div className="absolute inset-0 cosmic-gradient" />
         <Header />
-        <main className="relative z-10 pt-32 pb-20 px-6">
-          <div className="max-w-7xl mx-auto">
-            <div className="mb-12">
-              <div className="h-12 bg-white/10 rounded-lg w-64 mb-4 animate-pulse" />
-              <div className="h-6 bg-white/10 rounded-lg w-96 animate-pulse" />
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
-              {[1, 2, 3, 4].map((i) => (
-                <div key={i} className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-6 animate-pulse">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="w-12 h-12 bg-white/10 rounded-xl" />
-                    <div className="w-16 h-4 bg-white/10 rounded" />
-                  </div>
-                  <div className="h-8 bg-white/10 rounded w-1/2 mb-2" />
-                  <div className="h-4 bg-white/10 rounded w-3/4" />
-                </div>
-              ))}
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              <div className="lg:col-span-2 space-y-4">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-6 animate-pulse">
-                    <div className="h-6 bg-white/10 rounded w-1/3 mb-4" />
-                    <div className="h-4 bg-white/10 rounded w-full mb-2" />
-                    <div className="h-4 bg-white/10 rounded w-5/6" />
-                  </div>
-                ))}
-              </div>
-              <div className="lg:col-span-1">
-                <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-6 animate-pulse">
-                  <div className="h-6 bg-white/10 rounded w-1/2 mb-4" />
-                  <div className="space-y-3">
-                    {[1, 2, 3, 4].map((i) => (
-                      <div key={i} className="h-16 bg-white/10 rounded" />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+        <main className="relative z-10 pt-32 pb-20 px-6 flex justify-center">
+             <div className="text-white animate-pulse flex items-center gap-2">
+                <RefreshCw className="animate-spin" /> Loading Blockchain Data...
+             </div>
         </main>
       </div>
     );
@@ -336,13 +398,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-cosmic-dark relative overflow-hidden">
-      {/* Animated background */}
       <div className="absolute inset-0 cosmic-gradient" />
-      <div className="absolute inset-0 opacity-30">
-        <div className="absolute top-20 left-10 w-96 h-96 bg-cosmic-purple/20 rounded-full blur-3xl animate-pulse" />
-        <div className="absolute bottom-20 right-10 w-96 h-96 bg-cosmic-blue/20 rounded-full blur-3xl animate-pulse delay-1000" />
-      </div>
-
       <Header />
 
       <main className="relative z-10 pt-32 pb-20 px-6">
@@ -375,6 +431,120 @@ export default function DashboardPage() {
               {error}
             </div>
           )}
+
+          {/* === NEW: ACTION REQUIRED SECTION (Resolve / Claim) === */}
+          {marketsToResolve.length > 0 && (
+            <div id="action-required-section" className="mb-10 animate-in fade-in slide-in-from-top-4 duration-500">
+              <div className="bg-linear-to-r from-orange-500/20 to-red-600/10 border border-orange-500/40 rounded-2xl p-6 shadow-lg shadow-orange-500/5">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-orange-500/20 rounded-lg">
+                     <AlertTriangle className="w-6 h-6 text-orange-400 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-white">
+                       {/* Judul dinamis sesuai peran */}
+                       {marketsToResolve[0].userRole === 'participant' 
+                         ? (marketsToResolve[0].isEmergency ? 'Force Claim Available' : 'Pending Resolution') 
+                         : 'Action Required: Resolve Markets'}
+                    </h3>
+                    <p className="text-sm text-orange-200/80">
+                      {marketsToResolve[0].userRole === 'participant' 
+                        ? (marketsToResolve[0].isEmergency 
+                            ? "Creator failed to resolve. You can now FORCE RESOLVE to receive your winnings." 
+                            : "Market ended but prizes pending. Waiting for creator to resolve.")
+                        : "These markets have ended. Please select the winner to distribute prizes."}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 mt-4">
+                  {marketsToResolve.map((market) => (
+                    <div key={market.id} className="bg-black/40 backdrop-blur-md border border-white/10 rounded-xl p-5 hover:border-orange-500/30 transition-all">
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                             <span className="px-2 py-0.5 rounded text-xs bg-white/10 text-text-muted font-mono border border-white/5">
+                               ID: #{market.id}
+                             </span>
+                             {market.isEmergency ? (
+                               <span className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-400 border border-red-500/20 font-bold flex items-center gap-1">
+                                 <Zap className="w-3 h-3" /> FORCE CLAIM READY
+                               </span>
+                             ) : (
+                               <span className="px-2 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-400 border border-yellow-500/20 font-bold flex items-center gap-1">
+                                 <Clock className="w-3 h-3" /> PENDING RESOLUTION
+                               </span>
+                             )}
+                             <span className="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                               <DollarSign className="w-3 h-3" /> Pool: {market.prizePool} STT
+                             </span>
+                          </div>
+                          <h4 className="text-lg md:text-xl font-semibold text-white">{market.question}</h4>
+                          <div className="flex items-center gap-4 text-xs text-text-muted">
+                            <span className="flex items-center gap-1">
+                              <Activity className="w-3 h-3" /> {market.totalParticipants} Participants
+                            </span>
+                            <span>
+                              Ended: {market.endTime.toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="min-w-[200px]">
+                          {/* Logic Tombol: Muncul jika Creator ATAU jika Emergency Mode */}
+                          {(market.userRole === 'creator' || market.isEmergency) ? (
+                            <>
+                                <label className="text-xs uppercase tracking-wider text-text-muted mb-2 block font-semibold">
+                                  {market.userRole === 'participant' ? 'Select Winning Outcome (Force):' : 'Select Winner:'}
+                                </label>
+                                <div className="flex flex-wrap gap-2">
+                                  {market.options.map((option, idx) => (
+                                    <button
+                                      key={idx}
+                                      onClick={() => {
+                                        const confirmMsg = market.isEmergency 
+                                          ? `FORCE CLAIM: Confirm "${option}" won? Prizes will be distributed immediately.`
+                                          : `Confirm that "${option}" won? Prizes will be distributed immediately.`;
+                                          
+                                        if (window.confirm(confirmMsg)) {
+                                          handleResolveMarket(market, idx);
+                                        }
+                                      }}
+                                      disabled={resolvingId === market.id}
+                                      className={`
+                                        relative px-4 py-2 rounded-lg text-sm font-medium transition-all
+                                        ${resolvingId === market.id 
+                                          ? 'bg-white/5 text-gray-500 cursor-wait' 
+                                          : 'bg-white/10 hover:bg-emerald-500 hover:text-white border border-white/10 hover:border-emerald-400 text-gray-200'
+                                        }
+                                      `}
+                                    >
+                                      {resolvingId === market.id ? 'Processing...' : option}
+                                    </button>
+                                  ))}
+                                </div>
+                            </>
+                          ) : (
+                            // Tampilan jika Peserta harus menunggu
+                            <div className="p-3 bg-white/5 rounded-lg border border-dashed border-white/20">
+                                <p className="text-sm text-text-muted text-center">
+                                    Funds are currently locked.
+                                    <br />
+                                    <span className="text-xs text-yellow-400/80">
+                                        If creator doesn't resolve by {new Date(market.resolutionTime.getTime() + (7*24*60*60*1000)).toLocaleDateString()}, you can Force Claim here.
+                                    </span>
+                                </p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          {/* === END SECTION === */}
 
           {/* Quick Actions */}
           {userStats && (
@@ -443,7 +613,7 @@ export default function DashboardPage() {
               
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 {/* Current Streak */}
-                {/* @ts-ignore - bg-gradient-to-br is correct Tailwind class */}
+                {/* @ts-ignore */}
                 <div className="group relative bg-linear-to-br from-orange-500/10 to-orange-600/5 border border-orange-500/20 rounded-2xl p-6 hover:border-orange-500/40 transition-all duration-300">
                   <div className="flex items-center justify-between mb-3">
                     <div className="p-3 rounded-xl bg-orange-400/20 group-hover:scale-110 transition-transform duration-300">
@@ -458,7 +628,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Longest Streak */}
-                {/* @ts-ignore - bg-gradient-to-br is correct Tailwind class */}
+                {/* @ts-ignore */}
                 <div className="group relative bg-linear-to-br from-purple-500/10 to-purple-600/5 border border-purple-500/20 rounded-2xl p-6 hover:border-purple-500/40 transition-all duration-300">
                   <div className="flex items-center justify-between mb-3">
                     <div className="p-3 rounded-xl bg-purple-400/20 group-hover:scale-110 transition-transform duration-300">
@@ -472,8 +642,8 @@ export default function DashboardPage() {
                   <p className="text-3xl font-bold text-white text-glow">{userStats.longestStreak}</p>
                 </div>
 
-                {/* Accuracy with Progress Ring */}
-                {/* @ts-ignore - bg-gradient-to-br is correct Tailwind class */}
+                {/* Accuracy */}
+                {/* @ts-ignore */}
                 <div className="group relative bg-linear-to-br from-blue-500/10 to-blue-600/5 border border-blue-500/20 rounded-2xl p-6 hover:border-blue-500/40 transition-all duration-300">
                   <div className="flex items-center justify-between">
                     <div>
@@ -498,7 +668,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Total Points */}
-                {/* eslint-disable-next-line */}
+                {/* @ts-ignore */}
                 <div className="group relative bg-linear-to-br from-cosmic-purple/10 to-cosmic-blue/5 border border-cosmic-purple/20 rounded-2xl p-6 hover:border-cosmic-purple/40 transition-all duration-300">
                   <div className="flex items-center justify-between mb-3">
                     <div className="p-3 rounded-xl bg-cosmic-purple/20 group-hover:scale-110 transition-transform duration-300">
@@ -568,7 +738,6 @@ export default function DashboardPage() {
                     Bet History
                   </h2>
                   
-                  {/* Filters */}
                   {activeBets.length > 0 && (
                     <BetHistoryFilters
                       searchQuery={searchQuery}
@@ -623,7 +792,6 @@ export default function DashboardPage() {
                     Achievements
                   </h2>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* Streak Achievement */}
                     <AchievementCard
                       emoji="🔥"
                       title="Streak Master"
@@ -632,8 +800,6 @@ export default function DashboardPage() {
                       glowColor="bg-orange-500"
                       unlocked={userStats ? userStats.longestStreak >= 3 : false}
                     />
-
-                    {/* Accuracy Achievement */}
                     <AchievementCard
                       emoji="🎯"
                       title="Sharp Predictor"
@@ -642,8 +808,6 @@ export default function DashboardPage() {
                       glowColor="bg-emerald-500"
                       unlocked={userStats ? userStats.accuracyPercentage >= 70 && userStats.totalPredictions >= 5 : false}
                     />
-
-                    {/* Volume Achievement */}
                     <AchievementCard
                       emoji="📈"
                       title="Active Trader"
@@ -652,8 +816,6 @@ export default function DashboardPage() {
                       glowColor="bg-blue-500"
                       unlocked={userStats ? userStats.totalPredictions >= 10 : false}
                     />
-
-                    {/* Points Achievement */}
                     <AchievementCard
                       emoji="⭐"
                       title="Point Collector"
@@ -662,8 +824,6 @@ export default function DashboardPage() {
                       glowColor="bg-yellow-500"
                       unlocked={userStats ? userStats.totalPoints >= 100 : false}
                     />
-
-                    {/* Winnings Achievement */}
                     <AchievementCard
                       emoji="💰"
                       title="Big Winner"
@@ -672,8 +832,6 @@ export default function DashboardPage() {
                       glowColor="bg-purple-500"
                       unlocked={userStats ? parseFloat(userStats.totalWinnings) >= 1 : false}
                     />
-
-                    {/* First Prediction Achievement */}
                     <AchievementCard
                       emoji="🎊"
                       title="First Steps"
@@ -683,18 +841,6 @@ export default function DashboardPage() {
                       unlocked={userStats ? userStats.totalPredictions >= 1 : false}
                     />
                   </div>
-
-                  {userStats && userStats.totalPredictions === 0 && (
-                    <div className="mt-8">
-                      <EmptyState
-                        emoji="🏆"
-                        title="No Achievements Yet"
-                        description="Start making predictions to unlock achievements and earn rewards!"
-                        actionText="Start Predicting"
-                        actionHref="/markets"
-                      />
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -725,7 +871,7 @@ export default function DashboardPage() {
                   className="w-full mt-6 py-3 bg-linear-to-r from-cosmic-purple/20 to-cosmic-blue/20 hover:from-cosmic-purple/30 hover:to-cosmic-blue/30 border border-cosmic-purple/50 rounded-xl text-white font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2 group"
                 >
                   <span className="group-hover:rotate-180 transition-transform duration-500">
-                    🔄
+                    <RefreshCw className="w-5 h-5" />
                   </span>
                   <span>{loading ? "Refreshing..." : "Refresh Dashboard"}</span>
                 </button>
